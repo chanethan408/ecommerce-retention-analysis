@@ -30,6 +30,8 @@ python src/data_pipeline.py
 
 The pipeline reads `data/raw/events.csv` and saves the retention cohort to `data/processed/retention_cohort.parquet`.
 
+Open `notebooks/02_retention_analysis.ipynb` to review the cohort, return baseline, and prediction setup for the next modeling step. The notebook can run the pipeline itself, or you can run it from the project root first.
+
 ## Tests
 
 Run the pipeline tests from the project root with:
@@ -53,6 +55,7 @@ data/
   processed/
 notebooks/
   01_eda.ipynb
+  02_retention_analysis.ipynb
 tests/
   test_data_pipeline.py
 ```
