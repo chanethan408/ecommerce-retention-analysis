@@ -111,7 +111,8 @@ def run_pipeline(
                 completed_high_intent_action,
                 COUNT(*) AS users,
                 SUM(returned_day30_window) AS returned_users,
-                ROUND(AVG(returned_day30_window) * 100, 2) AS return_rate_pct
+                AVG(returned_day30_window) * 100 AS return_rate_pct,
+                AVG(activation_events) AS avg_activation_events
             FROM read_parquet(?)
             GROUP BY completed_high_intent_action
             ORDER BY completed_high_intent_action
@@ -126,9 +127,18 @@ def run_pipeline(
         return
 
     print("\nDay-30 return rates:")
-    for completed_action, users, returned_users, return_rate in summary:
+    return_rates = {}
+    for completed_action, users, returned_users, return_rate, avg_events in summary:
         action_label = "Yes" if completed_action else "No"
-        print(f"High-intent action {action_label}: {return_rate:.2f}% ({returned_users:,}/{users:,} users)")
+        return_rates[completed_action] = return_rate
+        print(
+            f"High-intent action {action_label}: {return_rate:.2f}% "
+            f"({returned_users:,}/{users:,} users); "
+            f"average first-3-day events: {avg_events:.1f}"
+        )
+    if 0 in return_rates and 1 in return_rates:
+        difference = return_rates[1] - return_rates[0]
+        print(f"Return-rate difference (Yes - No): {difference:+.2f} percentage points")
 
 
 if __name__ == "__main__":
