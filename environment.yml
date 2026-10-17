@@ -1,0 +1,21 @@
+name: ecommerce-retention-analysis
+
+channels:
+  - conda-forge
+
+dependencies:
+  - python=3.13
+  - pip
+  - pandas
+  - numpy
+  - duckdb
+  - pyarrow
+  - scipy
+  - statsmodels
+  - scikit-learn
+  - xgboost
+  - matplotlib
+  - seaborn
+  - jupyterlab
+  - ipykernel
+  - pytest
