@@ -10,6 +10,9 @@ env/
 # Jupyter
 .ipynb_checkpoints/
 
+# Data files
+*.csv
+
 # Secrets
 .env
 .env.*
