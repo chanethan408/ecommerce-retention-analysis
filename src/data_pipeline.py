@@ -5,7 +5,7 @@ from pathlib import Path
 import duckdb
 
 
-PROJECT_DIR = Path(__file__).resolve().parent
+PROJECT_DIR = Path(__file__).resolve().parent.parent
 RAW_EVENTS_PATH = PROJECT_DIR / "data" / "raw" / "events.csv"
 OUTPUT_PATH = PROJECT_DIR / "data" / "processed" / "retention_cohort.parquet"
 

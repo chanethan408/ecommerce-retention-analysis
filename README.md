@@ -9,7 +9,7 @@ Analysis of e-commerce customer retention and churn.
 git clone https://github.com/chanethan408/ecommerce-retention-analysis.git
 cd ecommerce-retention-analysis
 conda env create -f environment.yml
-conda activate retention-analytics
+conda activate ecommerce-retention-analysis
 ```
 
 Download `events.csv` from the [Kaggle Retailrocket Dataset](https://www.kaggle.com/datasets/retailrocket/ecommerce-dataset?resource=download&select=events.csv) and save it as `data/raw/events.csv`.
@@ -25,10 +25,18 @@ The EDA finds 2.76 million events from 1.41 million visitors, with views account
 From the project root, run:
 
 ```bash
-python data_pipeline.py
+python src/data_pipeline.py
 ```
 
 The pipeline reads `data/raw/events.csv` and saves the retention cohort to `data/processed/retention_cohort.parquet`.
+
+## Tests
+
+Run the pipeline tests from the project root with:
+
+```bash
+python -m pytest
+```
 
 ## Project Structure
 
@@ -36,12 +44,15 @@ The pipeline reads `data/raw/events.csv` and saves the retention cohort to `data
 .
   .gitignore
   README.md
-  data_pipeline.py
   environment.yml
+src/
+  data_pipeline.py
 data/
   raw/
     events.csv  # download locally; not tracked by Git
   processed/
 notebooks/
   01_eda.ipynb
+tests/
+  test_data_pipeline.py
 ```
