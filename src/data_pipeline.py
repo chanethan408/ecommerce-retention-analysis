@@ -1,4 +1,4 @@
-"""Build a retention cohort measured from each user's first observed event."""
+"""Build user-level features for a day-14 return prediction."""
 
 from pathlib import Path
 
@@ -9,11 +9,9 @@ PROJECT_DIR = Path(__file__).resolve().parent.parent
 RAW_EVENTS_PATH = PROJECT_DIR / "data" / "raw" / "events.csv"
 OUTPUT_PATH = PROJECT_DIR / "data" / "processed" / "retention_cohort.parquet"
 
-ACTIVATION_DAYS = 3
-MIN_ACTIVATION_EVENTS = 3
-MAX_ACTIVATION_EVENTS = 30
-RETURN_START_DAY = 27
-RETURN_END_DAY = 34  # exclusive
+FEATURE_DAYS = 14
+RETURN_START_DAY = 15
+RETURN_END_DAY = 45  # exclusive
 
 
 def run_pipeline(
@@ -29,6 +27,7 @@ def run_pipeline(
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     with duckdb.connect() as con:
+        con.execute("SET TimeZone = 'UTC'")
         con.execute(
             """
             CREATE TABLE events AS
@@ -52,7 +51,9 @@ def run_pipeline(
         if row_count == 0:
             raise ValueError("Events file is empty.")
         if missing_count:
-            raise ValueError(f"Events file has {missing_count} rows with missing required values.")
+            raise ValueError(
+                f"Events file has {missing_count} rows with missing required values."
+            )
 
         con.execute(
             f"""
@@ -62,42 +63,49 @@ def run_pipeline(
                     FROM events
                     GROUP BY user_id
                 ),
-                user_activity AS (
+                user_features AS (
                     SELECT
                         f.user_id,
                         f.first_event_time,
-                        COUNT(e.event_type) AS activation_events,
+                        COUNT(e.event_type) AS events_first_14_days,
+                        COUNT(DISTINCT CAST(e.event_time AS DATE))
+                            AS active_days_first_14_days,
                         COUNT(*) FILTER (
                             WHERE e.event_type IN ('addtocart', 'transaction')
-                        ) AS high_intent_actions
+                        ) AS high_intent_actions_first_14_days
                     FROM first_event f
                     LEFT JOIN events e
                         ON e.user_id = f.user_id
                         AND e.event_time >= f.first_event_time
-                        AND e.event_time < f.first_event_time + INTERVAL '{ACTIVATION_DAYS} days'
+                        AND e.event_time < f.first_event_time
+                            + INTERVAL '{FEATURE_DAYS} days'
                     GROUP BY f.user_id, f.first_event_time
                 ),
                 eligible_users AS (
-                    SELECT a.*
-                    FROM user_activity a
+                    SELECT u.*
+                    FROM user_features u
                     CROSS JOIN (SELECT MAX(event_time) AS latest_event FROM events) d
-                    WHERE a.first_event_time + INTERVAL '{RETURN_END_DAY} days' <= d.latest_event
-                      AND a.activation_events >= {MIN_ACTIVATION_EVENTS}
-                      AND a.activation_events <= {MAX_ACTIVATION_EVENTS}
+                    WHERE u.first_event_time + INTERVAL '{RETURN_END_DAY} days'
+                        <= d.latest_event
                 ),
                 labeled_users AS (
                     SELECT
                         u.*,
-                        CASE WHEN u.high_intent_actions > 0 THEN 1 ELSE 0 END
-                            AS completed_high_intent_action,
-                        CASE WHEN COUNT(*) FILTER (
-                            WHERE e.event_time >= u.first_event_time + INTERVAL '{RETURN_START_DAY} days'
-                              AND e.event_time < u.first_event_time + INTERVAL '{RETURN_END_DAY} days'
-                        ) > 0 THEN 1 ELSE 0 END AS returned_day30_window
+                        CASE WHEN COUNT(e.event_type) > 0 THEN 1 ELSE 0 END
+                            AS returned_days_15_44
                     FROM eligible_users u
-                    LEFT JOIN events e ON e.user_id = u.user_id
-                    GROUP BY u.user_id, u.first_event_time, u.activation_events,
-                             u.high_intent_actions
+                    LEFT JOIN events e
+                        ON e.user_id = u.user_id
+                        AND e.event_time >= u.first_event_time
+                            + INTERVAL '{RETURN_START_DAY} days'
+                        AND e.event_time < u.first_event_time
+                            + INTERVAL '{RETURN_END_DAY} days'
+                    GROUP BY
+                        u.user_id,
+                        u.first_event_time,
+                        u.events_first_14_days,
+                        u.active_days_first_14_days,
+                        u.high_intent_actions_first_14_days
                 )
                 SELECT * FROM labeled_users
             ) TO ? (FORMAT PARQUET)
@@ -105,40 +113,27 @@ def run_pipeline(
             [str(output_path)],
         )
 
-        summary = con.execute(
+        user_count, returners = con.execute(
             """
-            SELECT
-                completed_high_intent_action,
-                COUNT(*) AS users,
-                SUM(returned_day30_window) AS returned_users,
-                AVG(returned_day30_window) * 100 AS return_rate_pct,
-                AVG(activation_events) AS avg_activation_events
+            SELECT COUNT(*), SUM(returned_days_15_44)
             FROM read_parquet(?)
-            GROUP BY completed_high_intent_action
-            ORDER BY completed_high_intent_action
             """,
             [str(output_path)],
-        ).fetchall()
+        ).fetchone()
 
-    cohort_size = sum(row[1] for row in summary)
-    print(f"Saved {cohort_size:,} users to {output_path}")
-    if not summary:
-        print("No eligible users were found, so there are no return rates to show.")
-        return
-
-    print("\nDay-30 return rates:")
-    return_rates = {}
-    for completed_action, users, returned_users, return_rate, avg_events in summary:
-        action_label = "Yes" if completed_action else "No"
-        return_rates[completed_action] = return_rate
+    display_path = output_path.resolve()
+    if display_path.is_relative_to(PROJECT_DIR):
+        display_path = display_path.relative_to(PROJECT_DIR)
+    else:
+        display_path = Path(display_path.name)
+    print(f"Saved {user_count:,} eligible users to {display_path.as_posix()}")
+    if user_count:
         print(
-            f"High-intent action {action_label}: {return_rate:.2f}% "
-            f"({returned_users:,}/{users:,} users); "
-            f"average first-3-day events: {avg_events:.1f}"
+            f"Returned during days 15-44: {returners:,} "
+            f"({returners / user_count:.1%})"
         )
-    if 0 in return_rates and 1 in return_rates:
-        difference = return_rates[1] - return_rates[0]
-        print(f"Return-rate difference (Yes - No): {difference:+.2f} percentage points")
+    else:
+        print("No users had enough follow-up for the return window.")
 
 
 if __name__ == "__main__":

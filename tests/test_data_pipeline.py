@@ -1,14 +1,11 @@
 import csv
-import sys
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 import pandas as pd
 import pytest
+import duckdb
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
-from data_pipeline import run_pipeline
+from src.data_pipeline import run_pipeline
 
 
 def _write_events(path, rows):
@@ -32,90 +29,46 @@ def _run_pipeline(tmp_path, rows):
     return pd.read_parquet(output_path)
 
 
-def test_pipeline_labels_high_intent_and_return_window(tmp_path):
+def test_pipeline_builds_day14_features_and_days15_to44_label(tmp_path):
     start = datetime(2025, 1, 1, tzinfo=timezone.utc)
     rows = [
-        _event(start, "high_intent", 0),
-        _event(start, "high_intent", 1, "addtocart"),
-        _event(start, "high_intent", 2),
-        _event(start, "high_intent", 27),
-        _event(start, "day_33_return", 0),
-        _event(start, "day_33_return", 1),
-        _event(start, "day_33_return", 2),
-        _event(start, "day_33_return", 33, second=86399),
-        _event(start, "later_start_transaction", 10),
-        _event(start, "later_start_transaction", 11, "transaction"),
-        _event(start, "later_start_transaction", 12),
-        _event(start, "later_start_transaction", 37),
+        _event(start, "returner", 0),
+        _event(start, "returner", 1, "addtocart"),
+        _event(start, "returner", 13, "transaction"),
+        _event(start, "returner", 14),
+        _event(start, "returner", 15),
+        _event(start, "returner", 44),
+        _event(start, "returner", 45),
         _event(start, "no_return", 0),
-        _event(start, "no_return", 1),
         _event(start, "no_return", 2),
-        _event(start, "late_action", 0),
-        _event(start, "late_action", 1),
-        _event(start, "late_action", 2),
-        _event(start, "late_action", 5, "addtocart"),
-        _event(start, "late_action", 27),
-        _event(start, "day_34_boundary", 0),
-        _event(start, "day_34_boundary", 1),
-        _event(start, "day_34_boundary", 2),
-        _event(start, "day_34_boundary", 34),
-        _event(start, "latest_event", 60),
-    ]
-
-    cohort = _run_pipeline(tmp_path, rows).set_index("user_id")
-
-    assert cohort.index.is_unique
-    assert set(cohort.index) == {
-        "high_intent",
-        "day_33_return",
-        "later_start_transaction",
-        "no_return",
-        "late_action",
-        "day_34_boundary",
-    }
-    assert cohort.loc["high_intent", "completed_high_intent_action"] == 1
-    assert cohort.loc["later_start_transaction", "completed_high_intent_action"] == 1
-    assert cohort.loc["no_return", "completed_high_intent_action"] == 0
-    assert cohort.loc["late_action", "completed_high_intent_action"] == 0
-    # The return window includes Days 27-33 and excludes Day 34.
-    assert cohort["returned_day30_window"].to_dict() == {
-        "high_intent": 1,
-        "day_33_return": 1,
-        "later_start_transaction": 1,
-        "no_return": 0,
-        "late_action": 1,
-        "day_34_boundary": 0,
-    }
-
-
-def test_pipeline_excludes_users_outside_cohort_rules(tmp_path):
-    start = datetime(2025, 1, 1, tzinfo=timezone.utc)
-    rows = [
-        _event(start, "too_few", 0),
-        _event(start, "too_few", 1),
-        # This user's first event is Day 30, leaving fewer than 34 days of follow-up.
+        _event(start, "day_45_only", 0),
+        _event(start, "day_45_only", 45),
         _event(start, "late_start", 30),
         _event(start, "late_start", 31),
         _event(start, "late_start", 32),
-        _event(start, "latest_event", 60),
+        _event(start, "latest_event", 70),
     ]
-    rows.extend(_event(start, "max_allowed", 0, second=i) for i in range(30))
-    rows.extend(_event(start, "too_many", 0, second=i) for i in range(31))
 
     cohort = _run_pipeline(tmp_path, rows).set_index("user_id")
 
     assert cohort.index.is_unique
-    assert cohort.index.tolist() == ["max_allowed"]
-    assert cohort.loc["max_allowed", "activation_events"] == 30
+    assert set(cohort.index) == {"returner", "no_return", "day_45_only"}
+    assert cohort.loc["returner", "events_first_14_days"] == 3
+    assert cohort.loc["returner", "active_days_first_14_days"] == 3
+    assert cohort.loc["returner", "high_intent_actions_first_14_days"] == 2
+    assert cohort["returned_days_15_44"].to_dict() == {
+        "returner": 1,
+        "no_return": 0,
+        "day_45_only": 0,
+    }
 
 
 def test_pipeline_output_is_unchanged_on_rerun(tmp_path):
     start = datetime(2025, 1, 1, tzinfo=timezone.utc)
     rows = [
         _event(start, "user", 0),
-        _event(start, "user", 1),
-        _event(start, "user", 2),
-        _event(start, "user", 30),
+        _event(start, "user", 20),
+        _event(start, "another_user", 1),
         _event(start, "latest_event", 60),
     ]
     raw_path = tmp_path / "events.csv"
@@ -127,6 +80,9 @@ def test_pipeline_output_is_unchanged_on_rerun(tmp_path):
     run_pipeline(raw_path, output_path)
     second_output = pd.read_parquet(output_path)
 
+    # Compare the same visitors; row order can change between runs.
+    first_output = first_output.sort_values("user_id").reset_index(drop=True)
+    second_output = second_output.sort_values("user_id").reset_index(drop=True)
     pd.testing.assert_frame_equal(first_output, second_output)
 
 
@@ -155,3 +111,33 @@ def test_pipeline_rejects_empty_input(tmp_path):
 
     with pytest.raises(ValueError, match="Events file is empty"):
         run_pipeline(raw_path, tmp_path / "cohort.parquet")
+
+
+def test_pipeline_uses_utc_dates_even_when_connection_defaults_to_pacific(tmp_path, monkeypatch):
+    connect = duckdb.connect
+
+    def pacific_connection(*args, **kwargs):
+        con = connect(*args, **kwargs)
+        con.execute("SET TimeZone = 'America/Los_Angeles'")
+        return con
+
+    monkeypatch.setattr(duckdb, "connect", pacific_connection)
+    start = datetime(2025, 1, 1, 23, 30, tzinfo=timezone.utc)
+    cohort = _run_pipeline(tmp_path, [
+        _event(start, "user", 0),
+        _event(start, "user", 0, second=3600),
+        _event(start, "latest", 60),
+    ]).set_index("user_id")
+    assert cohort.loc["user", "active_days_first_14_days"] == 2
+
+
+def test_events_in_scoring_gap_are_neither_features_nor_returns(tmp_path):
+    start = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    cohort = _run_pipeline(tmp_path, [
+        _event(start, "user", 0),
+        _event(start, "user", 14),
+        _event(start, "user", 14, second=86399),
+        _event(start, "latest", 60),
+    ]).set_index("user_id")
+    assert cohort.loc["user", "events_first_14_days"] == 1
+    assert cohort.loc["user", "returned_days_15_44"] == 0
