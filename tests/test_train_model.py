@@ -2,12 +2,14 @@ import pandas as pd
 import pytest
 
 from src.train_model import (
+    FEATURE_DAYS,
+    HOLDOUT_SCORE_START,
+    RETURN_END_DAY,
+    VALIDATION_SCORE_END,
+    _ranking_metrics,
+    _rule_scores,
     _split_cohort,
     _top_fraction_metrics,
-    VALIDATION_SCORE_END,
-    HOLDOUT_SCORE_START,
-    FEATURE_DAYS,
-    RETURN_END_DAY,
 )
 
 
@@ -30,7 +32,6 @@ def test_top_fraction_averages_boundary_ties_without_using_row_order():
     ("2015-07-25 00:00:00", {"test"}),
 ])
 def test_visitors_go_into_the_right_date_groups(first_seen, expected_groups):
-    # Dates just before, at, and after the limits should land in the right groups.
     cohort = pd.DataFrame({"first_event_time": [pd.Timestamp(first_seen, tz="UTC")]})
     groups = _split_cohort(cohort)
     names = ("train", "validation", "test", "final_train")
@@ -39,6 +40,26 @@ def test_visitors_go_into_the_right_date_groups(first_seen, expected_groups):
 
 
 def test_validation_outcomes_are_ready_before_holdout_scoring():
-    # Even the end of the validation period leaves enough time to see returns.
     outcomes_ready = VALIDATION_SCORE_END + pd.Timedelta(days=RETURN_END_DAY - FEATURE_DAYS)
     assert outcomes_ready <= HOLDOUT_SCORE_START
+
+
+def test_recency_rule_puts_recent_visitors_first():
+    cohort = pd.DataFrame({
+        "events_first_14_days": [100, 1],
+        "active_days_first_14_days": [5, 1],
+        "high_intent_actions_first_14_days": [0, 1],
+        "days_since_last_event": [10.0, 0.5],
+    })
+    scores = _rule_scores(cohort)
+    assert scores["recency"].idxmax() == 1
+    assert scores["event count"].idxmax() == 0
+    assert scores["high intent"].idxmax() == 1
+
+
+def test_capture_reports_share_of_returners_at_each_selection_size():
+    labels = pd.Series([1, 1] + [0] * 17 + [1])
+    metrics = _ranking_metrics(labels, list(range(20, 0, -1)))
+    assert metrics["capture_at_5pct"] == pytest.approx(1 / 3)
+    assert metrics["capture_at_10pct"] == pytest.approx(2 / 3)
+    assert metrics["capture_at_20pct"] == pytest.approx(2 / 3)

@@ -1,9 +1,9 @@
 import csv
 from datetime import datetime, timedelta, timezone
 
+import duckdb
 import pandas as pd
 import pytest
-import duckdb
 
 from src.data_pipeline import run_pipeline
 
@@ -141,3 +141,56 @@ def test_events_in_scoring_gap_are_neither_features_nor_returns(tmp_path):
     ]).set_index("user_id")
     assert cohort.loc["user", "events_first_14_days"] == 1
     assert cohort.loc["user", "returned_days_15_44"] == 0
+
+
+def test_new_features_describe_when_activity_happened(tmp_path):
+    start = datetime(2025, 1, 1, 12, tzinfo=timezone.utc)
+    cohort = _run_pipeline(tmp_path, [
+        _event(start, "spread", 0),
+        _event(start, "spread", 6, "addtocart", second=86399),
+        _event(start, "spread", 7, "addtocart"),
+        _event(start, "spread", 13, "transaction"),
+        _event(start, "spread", 14, "transaction"),
+        _event(start, "burst", 0),
+        _event(start, "burst", 0, "addtocart"),
+        _event(start, "latest", 60),
+    ]).set_index("user_id")
+
+    spread = cohort.loc["spread"]
+    assert spread["days_since_last_event"] == pytest.approx(1)
+    assert spread["events_days_7_13"] == 2
+    assert spread["events_per_active_day"] == pytest.approx(4 / 3)
+    assert spread["longest_inactivity_gap_days"] == pytest.approx(7 - 1 / 86400)
+    assert spread["active_weeks_first_14_days"] == 2
+    assert spread["cart_actions_first_14_days"] == 2
+    assert spread["transactions_first_14_days"] == 1
+
+    burst = cohort.loc["burst"]
+    assert burst["days_since_last_event"] == pytest.approx(14)
+    assert burst["events_days_7_13"] == 0
+    assert burst["events_per_active_day"] == pytest.approx(2)
+    assert burst["longest_inactivity_gap_days"] == pytest.approx(14)
+    assert burst["active_weeks_first_14_days"] == 1
+    assert burst["transactions_first_14_days"] == 0
+
+
+def test_later_events_do_not_change_features(tmp_path):
+    start = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    rows = [
+        _event(start, "user", 0),
+        _event(start, "user", 13, "addtocart", second=86399),
+        _event(start, "latest", 60),
+    ]
+    before = _run_pipeline(tmp_path, rows).set_index("user_id")
+    rows += [
+        _event(start, "user", 14, "transaction"),
+        _event(start, "user", 15, "transaction"),
+        _event(start, "user", 30, "addtocart"),
+    ]
+    after = _run_pipeline(tmp_path, rows).set_index("user_id")
+    feature_columns = before.columns.drop(["first_event_time", "returned_days_15_44"])
+    pd.testing.assert_series_equal(
+        before.loc["user", feature_columns], after.loc["user", feature_columns],
+    )
+    assert before.loc["user", "returned_days_15_44"] == 0
+    assert after.loc["user", "returned_days_15_44"] == 1

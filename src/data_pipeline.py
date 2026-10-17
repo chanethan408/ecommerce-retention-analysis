@@ -63,23 +63,54 @@ def run_pipeline(
                     FROM events
                     GROUP BY user_id
                 ),
-                user_features AS (
+                feature_events AS (
                     SELECT
                         f.user_id,
                         f.first_event_time,
-                        COUNT(e.event_type) AS events_first_14_days,
-                        COUNT(DISTINCT CAST(e.event_time AS DATE))
-                            AS active_days_first_14_days,
-                        COUNT(*) FILTER (
-                            WHERE e.event_type IN ('addtocart', 'transaction')
-                        ) AS high_intent_actions_first_14_days
+                        e.event_time,
+                        e.event_type,
+                        LAG(e.event_time) OVER (
+                            PARTITION BY f.user_id ORDER BY e.event_time
+                        ) AS previous_event_time
                     FROM first_event f
-                    LEFT JOIN events e
+                    JOIN events e
                         ON e.user_id = f.user_id
                         AND e.event_time >= f.first_event_time
                         AND e.event_time < f.first_event_time
                             + INTERVAL '{FEATURE_DAYS} days'
-                    GROUP BY f.user_id, f.first_event_time
+                ),
+                user_features AS (
+                    SELECT
+                        user_id,
+                        first_event_time,
+                        COUNT(*) AS events_first_14_days,
+                        COUNT(DISTINCT CAST(event_time AS DATE))
+                            AS active_days_first_14_days,
+                        COUNT(*) FILTER (
+                            WHERE event_type IN ('addtocart', 'transaction')
+                        ) AS high_intent_actions_first_14_days,
+                        EPOCH(first_event_time + INTERVAL '{FEATURE_DAYS} days'
+                            - MAX(event_time)) / 86400.0 AS days_since_last_event,
+                        COUNT(*) FILTER (
+                            WHERE event_time >= first_event_time + INTERVAL '7 days'
+                        ) AS events_days_7_13,
+                        COUNT(*) * 1.0 / COUNT(DISTINCT CAST(event_time AS DATE))
+                            AS events_per_active_day,
+                        GREATEST(
+                            COALESCE(MAX(EPOCH(event_time - previous_event_time)
+                                / 86400.0), 0),
+                            EPOCH(first_event_time + INTERVAL '{FEATURE_DAYS} days'
+                                - MAX(event_time)) / 86400.0
+                        ) AS longest_inactivity_gap_days,
+                        COUNT(DISTINCT FLOOR(
+                            EPOCH(event_time - first_event_time) / (7 * 86400.0)
+                        )) AS active_weeks_first_14_days,
+                        COUNT(*) FILTER (WHERE event_type = 'addtocart')
+                            AS cart_actions_first_14_days,
+                        COUNT(*) FILTER (WHERE event_type = 'transaction')
+                            AS transactions_first_14_days
+                    FROM feature_events
+                    GROUP BY user_id, first_event_time
                 ),
                 eligible_users AS (
                     SELECT u.*
@@ -91,21 +122,16 @@ def run_pipeline(
                 labeled_users AS (
                     SELECT
                         u.*,
-                        CASE WHEN COUNT(e.event_type) > 0 THEN 1 ELSE 0 END
+                        CASE WHEN EXISTS (
+                            SELECT 1 FROM events e
+                            WHERE e.user_id = u.user_id
+                                AND e.event_time >= u.first_event_time
+                                    + INTERVAL '{RETURN_START_DAY} days'
+                                AND e.event_time < u.first_event_time
+                                    + INTERVAL '{RETURN_END_DAY} days'
+                        ) THEN 1 ELSE 0 END
                             AS returned_days_15_44
                     FROM eligible_users u
-                    LEFT JOIN events e
-                        ON e.user_id = u.user_id
-                        AND e.event_time >= u.first_event_time
-                            + INTERVAL '{RETURN_START_DAY} days'
-                        AND e.event_time < u.first_event_time
-                            + INTERVAL '{RETURN_END_DAY} days'
-                    GROUP BY
-                        u.user_id,
-                        u.first_event_time,
-                        u.events_first_14_days,
-                        u.active_days_first_14_days,
-                        u.high_intent_actions_first_14_days
                 )
                 SELECT * FROM labeled_users
             ) TO ? (FORMAT PARQUET)
