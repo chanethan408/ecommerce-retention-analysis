@@ -49,17 +49,27 @@ RULES = {
 }
 
 
-def _rule_scores(cohort: pd.DataFrame) -> pd.DataFrame:
+def rule_scores(cohort: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame({
         name: cohort[column].to_numpy() * direction
         for name, (column, direction) in RULES.items()
     })
 
 
-def _top_fraction_metrics(labels: pd.Series, scores, fraction=TOP_FRACTION) -> tuple[float, float]:
+def validate_scores(labels, scores):
+    labels, scores = np.asarray(labels), np.asarray(scores)
+    if labels.ndim != 1 or scores.ndim != 1 or len(labels) == 0 or len(labels) != len(scores):
+        raise ValueError("Labels and scores must be nonempty vectors of equal length.")
+    if not np.isin(labels, [0, 1]).all() or not np.isfinite(scores).all():
+        raise ValueError("Labels must be binary and scores must be finite.")
+    return labels, scores
+
+
+def top_fraction_metrics(labels: pd.Series, scores, fraction=TOP_FRACTION) -> tuple[float, float]:
+    labels, scores = validate_scores(labels, scores)
+    if not np.isfinite(fraction) or not 0 < fraction <= 1:
+        raise ValueError("Selection fraction must be in (0, 1].")
     top_count = max(1, int(len(labels) * fraction))
-    scores = np.asarray(scores)
-    labels = np.asarray(labels)
     cutoff = np.sort(scores)[-top_count]
     above = scores > cutoff
     tied = scores == cutoff
@@ -70,17 +80,18 @@ def _top_fraction_metrics(labels: pd.Series, scores, fraction=TOP_FRACTION) -> t
     return precision, recall
 
 
-def _ranking_metrics(labels: pd.Series, scores) -> dict[str, float]:
-    metrics = {"average_precision": float(average_precision_score(labels, scores))}
+def ranking_metrics(labels: pd.Series, scores) -> dict[str, float]:
+    labels, scores = validate_scores(labels, scores)
+    metrics = {"average_precision": float(average_precision_score(labels, scores)) if labels.sum() else 0.0}
     for fraction in (0.05, 0.10, 0.20):
-        precision, capture = _top_fraction_metrics(labels, scores, fraction)
+        precision, capture = top_fraction_metrics(labels, scores, fraction)
         metrics[f"capture_at_{int(fraction * 100)}pct"] = float(capture)
         if fraction == TOP_FRACTION:
             metrics["top_10_precision"] = float(precision)
     return metrics
 
 
-def _make_model(name: str, params: dict | None = None):
+def make_model(name: str, params: dict | None = None):
     params = params or {}
     if name == "logistic regression":
         return make_pipeline(StandardScaler(), LogisticRegression(max_iter=1000, **params))
@@ -93,8 +104,10 @@ def _make_model(name: str, params: dict | None = None):
     raise ValueError(f"Unknown model: {name}")
 
 
-def _split_cohort(cohort: pd.DataFrame):
+def split_cohort(cohort: pd.DataFrame):
     """Group visitors by when their features and outcomes are available."""
+    # XGBoost's histogram construction can depend on row order, even with a fixed seed.
+    cohort = cohort.sort_values(["first_event_time", "user_id"]).reset_index(drop=True)
     feature_ready = cohort["first_event_time"] + pd.Timedelta(days=FEATURE_DAYS)
     labels_ready = cohort["first_event_time"] + pd.Timedelta(days=RETURN_END_DAY)
     train = cohort.loc[labels_ready <= VALIDATION_SCORE_START]
@@ -105,3 +118,42 @@ def _split_cohort(cohort: pd.DataFrame):
     test = cohort.loc[feature_ready >= HOLDOUT_SCORE_START]
     final_train = cohort.loc[labels_ready <= HOLDOUT_SCORE_START]
     return train, validation, test, final_train
+
+
+def evaluate_candidate(train, validation, model_name, feature_set, params=None):
+    """Fit on training visitors and score validation without changing either frame."""
+    columns = FEATURE_SETS[feature_set]
+    model = make_model(model_name, params)
+    model.fit(train[columns], train[TARGET])
+    predictions = model.predict_proba(validation[columns])[:, 1]
+    return predictions, ranking_metrics(validation[TARGET], predictions)
+
+
+def choose_ranking(metrics, candidates):
+    """Choose by validation AP; insertion order breaks exact ties."""
+    name = max(metrics, key=lambda key: metrics[key]["average_precision"])
+    spec = candidates[name] if name in candidates else {"model": name, "feature_set": "full", "params": {}}
+    return name, {**spec, "params": dict(spec["params"])}
+
+
+def paired_bootstrap(labels, model_scores, baseline_scores, repeats=500, seed=42):
+    """Visitor bootstrap of fixed predictions, pairing both rankings on each draw."""
+    labels, model_scores = validate_scores(labels, model_scores)
+    _, baseline_scores = validate_scores(labels, baseline_scores)
+    if repeats < 2:
+        raise ValueError("At least two bootstrap repeats are required.")
+    keys = ["average_precision", "capture_at_5pct", "capture_at_10pct", "capture_at_20pct"]
+    model_metrics = ranking_metrics(labels, model_scores)
+    baseline_metrics = ranking_metrics(labels, baseline_scores)
+    rng = np.random.default_rng(seed)
+    differences = []
+    for _ in range(repeats):
+        indices = rng.integers(len(labels), size=len(labels))
+        first = ranking_metrics(labels[indices], model_scores[indices])
+        second = ranking_metrics(labels[indices], baseline_scores[indices])
+        differences.append([first[key] - second[key] for key in keys])
+    bounds = np.quantile(differences, [0.025, 0.975], axis=0)
+    return pd.DataFrame({
+        "difference": [model_metrics[key] - baseline_metrics[key] for key in keys],
+        "lower 95% bound": bounds[0], "upper 95% bound": bounds[1],
+    }, index=keys)

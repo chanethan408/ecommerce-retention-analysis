@@ -15,6 +15,7 @@ env/
 # Data files
 *.csv
 data/processed/*.parquet
+data/processed/*.json
 
 # Secrets
 .env

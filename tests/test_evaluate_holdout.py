@@ -3,12 +3,13 @@ import pandas as pd
 import pytest
 
 from src import evaluate_holdout as holdout_module
-from src.train_model import ALL_FEATURES, FEATURE_SETS, TARGET
+from src.ranking import ALL_FEATURES, FEATURE_SETS, TARGET
 
 
 @pytest.mark.parametrize("feature_set", ["full", "without recency"])
 def test_holdout_refits_only_the_chosen_model_with_available_outcomes(monkeypatch, feature_set):
     cohort = pd.DataFrame({
+        "user_id": [1, 2, 3, 4, 5],
         "first_event_time": pd.to_datetime([
             "2015-06-01", "2015-06-02", "2015-07-01",
             "2015-07-25", "2015-07-26",
@@ -35,7 +36,7 @@ def test_holdout_refits_only_the_chosen_model_with_available_outcomes(monkeypatc
         assert params == {"C": 0.1}
         return Model()
 
-    monkeypatch.setattr(holdout_module, "_make_model", make_model)
+    monkeypatch.setattr(holdout_module, "make_model", make_model)
     results = holdout_module.evaluate_holdout(
         cohort, "logistic regression", feature_set, {"C": 0.1},
     )

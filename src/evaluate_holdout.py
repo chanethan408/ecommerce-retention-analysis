@@ -2,7 +2,7 @@
 
 import pandas as pd
 
-from .train_model import (
+from .ranking import (
     FEATURE_DAYS,
     FEATURE_SETS,
     HOLDOUT_SCORE_START,
@@ -10,10 +10,10 @@ from .train_model import (
     RULES,
     TARGET,
     VALIDATION_SCORE_END,
-    _make_model,
-    _ranking_metrics,
-    _rule_scores,
-    _split_cohort,
+    make_model,
+    ranking_metrics,
+    rule_scores,
+    split_cohort,
 )
 
 
@@ -31,22 +31,21 @@ def evaluate_holdout(
     if outcomes_ready > HOLDOUT_SCORE_START:
         raise ValueError("Validation outcomes must be ready before holdout scoring.")
 
-    cohort = cohort.sort_values("first_event_time").reset_index(drop=True)
-    _, _, holdout, final_train = _split_cohort(cohort)
+    _, _, holdout, final_train = split_cohort(cohort)
     if final_train.empty or final_train[TARGET].nunique() < 2:
         raise ValueError("Final training data needs both outcomes.")
     if holdout.empty or holdout[TARGET].nunique() < 2:
         raise ValueError("Holdout data needs both outcomes.")
 
-    scores = _rule_scores(holdout)
+    scores = rule_scores(holdout)
     scores.insert(0, "returned", holdout[TARGET].to_numpy())
     if selected_name not in RULES:
-        model = _make_model(selected_name, params)
+        model = make_model(selected_name, params)
         model.fit(final_train[features], final_train[TARGET])
         scores[f"{selected_name} / {feature_set}"] = model.predict_proba(holdout[features])[:, 1]
 
     metrics = {
-        name: _ranking_metrics(scores["returned"], scores[name])
+        name: ranking_metrics(scores["returned"], scores[name])
         for name in scores.columns.drop("returned")
     }
     return {
